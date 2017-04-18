@@ -23,7 +23,7 @@ class DB {
   public static $user = '';
   public static $password = '';
   public static $host = 'localhost';
-  public static $port = 3306; //hhvm complains if this is null
+  public static $port = null;
   public static $encoding = 'latin1';
   
   // configure workings
@@ -38,11 +38,10 @@ class DB {
   public static $usenull = true;
   public static $ssl = array('key' => '', 'cert' => '', 'ca_cert' => '', 'ca_path' => '', 'cipher' => '');
   public static $connect_options = array(MYSQLI_OPT_CONNECT_TIMEOUT => 30);
+  public static $convert_html_chars = true;
   
   // internal
   protected static $mdb = null;
-  public static $variables_to_sync = array('param_char', 'named_param_seperator', 'success_handler', 'error_handler', 'throw_exception_on_error',
-    'nonsql_error_handler', 'throw_exception_on_nonsql_error', 'nested_transactions', 'usenull', 'ssl', 'connect_options');
   
   public static function getMDB() {
     $mdb = DB::$mdb;
@@ -51,8 +50,16 @@ class DB {
       $mdb = DB::$mdb = new MeekroDB();
     }
 
-    // Sync everytime because settings might have changed. It's fast.
-    $mdb->sync_config(); 
+    static $variables_to_sync = array('param_char', 'named_param_seperator', 'success_handler', 'error_handler', 'throw_exception_on_error',
+      'nonsql_error_handler', 'throw_exception_on_nonsql_error', 'nested_transactions', 'usenull', 'ssl', 'connect_options');
+
+    $db_class_vars = get_class_vars('DB'); // the DB::$$var syntax only works in 5.3+
+
+    foreach ($variables_to_sync as $variable) {
+      if ($mdb->$variable !== $db_class_vars[$variable]) {
+        $mdb->$variable = $db_class_vars[$variable];
+      }
+    }
     
     return $mdb;
   }
@@ -112,7 +119,7 @@ class MeekroDB {
   public $user = '';
   public $password = '';
   public $host = 'localhost';
-  public $port = 3306;
+  public $port = null;
   public $encoding = 'latin1';
   
   // configure workings
@@ -152,19 +159,6 @@ class MeekroDB {
     $this->dbName = $dbName;
     $this->port = $port;
     $this->encoding = $encoding;
-
-    $this->sync_config();
-  }
-
-  // suck in config settings from static class
-  public function sync_config() {
-    $db_class_vars = get_class_vars('DB'); // the DB::$$var syntax only works in 5.3+
-
-    foreach (DB::$variables_to_sync as $variable) {
-      if ($this->$variable !== $db_class_vars[$variable]) {
-        $this->$variable = $db_class_vars[$variable];
-      }
-    }
   }
   
   public function get() {
@@ -188,7 +182,7 @@ class MeekroDB {
       @$mysql->real_connect($this->host, $this->user, $this->password, $this->dbName, $this->port, null, $connect_flags);
       
       if ($mysql->connect_error) {
-        return $this->nonSQLError('Unable to connect to MySQL server! Error: ' . $mysql->connect_error);
+        $this->nonSQLError('Unable to connect to MySQL server! Error: ' . $mysql->connect_error);
       }
       
       $mysql->set_charset($this->encoding);
@@ -236,7 +230,7 @@ class MeekroDB {
   public function useDB() { $args = func_get_args(); return call_user_func_array(array($this, 'setDB'), $args); }
   public function setDB($dbName) {
     $db = $this->get();
-    if (! $db->select_db($dbName)) return $this->nonSQLError("Unable to set database to $dbName");
+    if (! $db->select_db($dbName)) $this->nonSQLError("Unable to set database to $dbName");
     $this->current_db = $dbName;
   }
   
@@ -306,7 +300,7 @@ class MeekroDB {
     $params = array_shift($args);
     $where = array_shift($args);
     
-    $query = str_replace('%', $this->param_char, "UPDATE %b SET %hc WHERE ") . $where;
+    $query = str_replace('%', $this->param_char, "UPDATE %b SET %? WHERE ") . $where;
     
     array_unshift($args, $params);
     array_unshift($args, $table);
@@ -319,7 +313,6 @@ class MeekroDB {
     $keys = $values = array();
     
     if (isset($datas[0]) && is_array($datas[0])) {
-      $var = '%ll?';
       foreach ($datas as $datum) {
         ksort($datum);
         if (! $keys) $keys = array_keys($datum);
@@ -327,7 +320,6 @@ class MeekroDB {
       }
       
     } else {
-      $var = '%l?';
       $keys = array_keys($datas);
       $values = array_values($datas);
     }
@@ -337,12 +329,12 @@ class MeekroDB {
     if (isset($options['update']) && is_array($options['update']) && $options['update'] && strtolower($which) == 'insert') {
       if (array_values($options['update']) !== $options['update']) {
         return $this->query(
-          str_replace('%', $this->param_char, "INSERT INTO %b %lb VALUES $var ON DUPLICATE KEY UPDATE %hc"), 
+          str_replace('%', $this->param_char, "INSERT INTO %b %lb VALUES %? ON DUPLICATE KEY UPDATE %?"), 
           $table, $keys, $values, $options['update']);
       } else {
         $update_str = array_shift($options['update']);
         $query_param = array(
-          str_replace('%', $this->param_char, "INSERT INTO %b %lb VALUES $var ON DUPLICATE KEY UPDATE ") . $update_str, 
+          str_replace('%', $this->param_char, "INSERT INTO %b %lb VALUES %? ON DUPLICATE KEY UPDATE ") . $update_str, 
           $table, $keys, $values);
         $query_param = array_merge($query_param, $options['update']);
         return call_user_func_array(array($this, 'query'), $query_param);
@@ -351,7 +343,7 @@ class MeekroDB {
     } 
     
     return $this->query(
-      str_replace('%', $this->param_char, "%l INTO %b %lb VALUES $var"), 
+      str_replace('%', $this->param_char, "%l INTO %b %lb VALUES %?"), 
       $which, $table, $keys, $values);
   }
   
@@ -366,7 +358,7 @@ class MeekroDB {
     
     if (! isset($args[0])) { // update will have all the data of the insert
       if (isset($data[0]) && is_array($data[0])) { //multiple insert rows specified -- failing!
-        return $this->nonSQLError("Badly formatted insertUpdate() query -- you didn't specify the update component!");
+        $this->nonSQLError("Badly formatted insertUpdate() query -- you didn't specify the update component!");
       }
       
       $args[0] = $data;
@@ -432,11 +424,6 @@ class MeekroDB {
       $this->param_char . 'b',  // backtick
       $this->param_char . 't',  // timestamp
       $this->param_char . '?',  // infer type
-      $this->param_char . 'l?',  // list of inferred types
-      $this->param_char . 'll?',  // list of lists of inferred types
-      $this->param_char . 'hc',  // hash `key`='value' pairs separated by commas
-      $this->param_char . 'ha',  // hash `key`='value' pairs separated by and
-      $this->param_char . 'ho',  // hash `key`='value' pairs separated by or
       $this->param_char . 'ss'  // search string (like string, surrounded with %'s)
     );
     
@@ -468,7 +455,7 @@ class MeekroDB {
       // handle numbered parameters
       if ($arg_number_length = strspn($sql, '0123456789', $new_pos_back)) {
         $arg_number = substr($sql, $new_pos_back, $arg_number_length);
-        if (! array_key_exists($arg_number, $args_all)) return $this->nonSQLError("Non existent argument reference (arg $arg_number): $sql");
+        if (! array_key_exists($arg_number, $args_all)) $this->nonSQLError("Non existent argument reference (arg $arg_number): $sql");
         
         $arg = $args_all[$arg_number];
         
@@ -478,8 +465,8 @@ class MeekroDB {
           $new_pos_back + $named_seperator_length) + $named_seperator_length;
         
         $arg_number = substr($sql, $new_pos_back + $named_seperator_length, $arg_number_length - $named_seperator_length);
-        if (count($args_all) != 1 || !is_array($args_all[0])) return $this->nonSQLError("If you use named parameters, the second argument must be an array of parameters");
-        if (! array_key_exists($arg_number, $args_all[0])) return $this->nonSQLError("Non existent argument reference (arg $arg_number): $sql");
+        if (count($args_all) != 1 || !is_array($args_all[0])) $this->nonSQLError("If you use named parameters, the second argument must be an array of parameters");
+        if (! array_key_exists($arg_number, $args_all[0])) $this->nonSQLError("Non existent argument reference (arg $arg_number): $sql");
         
         $arg = $args_all[0][$arg_number];
         
@@ -508,56 +495,41 @@ class MeekroDB {
     return $chunkyQuery;
   }
   
-  public function escape($str) { return "'" . $this->get()->real_escape_string(strval($str)) . "'"; }
-  
-  public function sanitize($value, $type='basic', $hashjoin=', ') {
-    if ($type == 'basic') {
-      if (is_object($value)) {
-        if ($value instanceof MeekroDBEval) return $value->text;
-        else if ($value instanceof DateTime) return $this->escape($value->format('Y-m-d H:i:s'));
-        else return $this->escape($value); // use __toString() value for objects, when possible
-      }
-      
-      if (is_null($value)) return $this->usenull ? 'NULL' : "''";
-      else if (is_bool($value)) return ($value ? 1 : 0);
-      else if (is_int($value)) return $value;
-      else if (is_float($value)) return $value;
-      else if (is_array($value)) return "''";
-      else return $this->escape($value);
-
-    } else if ($type == 'list') {
-      if (is_array($value)) {
-        $value = array_values($value);
-        return '(' . implode(', ', array_map(array($this, 'sanitize'), $value)) . ')';
-      } else {
-        return $this->nonSQLError("Expected array parameter, got something different!");
-      }
-    } else if ($type == 'doublelist') {
-      if (is_array($value) && array_values($value) === $value && is_array($value[0])) {
-        $cleanvalues = array();
-        foreach ($value as $subvalue) {
-          $cleanvalues[] = $this->sanitize($subvalue, 'list');
-        }
-        return implode(', ', $cleanvalues);
-
-      } else {
-        return $this->nonSQLError("Expected double array parameter, got something different!");
-      }
-    } else if ($type == 'hash') {
-      if (is_array($value)) {
-        $pairs = array();
-        foreach ($value as $k => $v) {
-          $pairs[] = $this->formatTableName($k) . '=' . $this->sanitize($v);
-        }
-        
-        return implode($hashjoin, $pairs);
-      } else {
-        return $this->nonSQLError("Expected hash (associative array) parameter, got something different!");
-      }
+  protected function escape($str) {
+    if($this->convert_html_chars) {
+      return "'" . htmlspecialchars($this->get()->real_escape_string(strval($str))) . "'"; 
     } else {
-      return $this->nonSQLError("Invalid type passed to sanitize()!");
+      return "'" . $this->get()->real_escape_string(strval($str)) . "'"; 
+    }
+  }
+  
+  protected function sanitize($value) {
+    if (is_object($value)) {
+      if ($value instanceof MeekroDBEval) return $value->text;
+      else if ($value instanceof DateTime) return $this->escape($value->format('Y-m-d H:i:s'));
+      else return '';
     }
     
+    if (is_null($value)) return $this->usenull ? 'NULL' : "''";
+    else if (is_bool($value)) return ($value ? 1 : 0);
+    else if (is_int($value)) return $value;
+    else if (is_float($value)) return $value;
+    
+    else if (is_array($value)) {
+      // non-assoc array?
+      if (array_values($value) === $value) {
+        if (is_array($value[0])) return implode(', ', array_map(array($this, 'sanitize'), $value));
+        else return '(' . implode(', ', array_map(array($this, 'sanitize'), $value)) . ')';
+      }
+      
+      $pairs = array();
+      foreach ($value as $k => $v) {
+        $pairs[] = $this->formatTableName($k) . '=' . $this->sanitize($v);
+      }
+      
+      return implode(', ', $pairs);
+    }
+    else return $this->escape($value);
   }
   
   protected function parseTS($ts) {
@@ -570,12 +542,12 @@ class MeekroDB {
     return floor(doubleval($var));
   }
   
-  public function parseQueryParams() {
+  protected function parseQueryParams() {
     $args = func_get_args();
     $chunkyQuery = call_user_func_array(array($this, 'preparseQueryParams'), $args);
     
     $query = '';
-    $array_types = array('ls', 'li', 'ld', 'lb', 'll', 'lt', 'l?', 'll?', 'hc', 'ha', 'ho');
+    $array_types = array('ls', 'li', 'ld', 'lb', 'll', 'lt');
     
     foreach ($chunkyQuery as $chunk) {
       if (is_string($chunk)) {
@@ -587,9 +559,11 @@ class MeekroDB {
       $arg = $chunk['value'];
       $result = '';
       
-      $is_array_type = in_array($type, $array_types, true);
-      if ($is_array_type && !is_array($arg)) return $this->nonSQLError("Badly formatted SQL query: Expected array, got scalar instead!");
-      else if (!$is_array_type && is_array($arg)) $arg = '';
+      if ($type != '?') {
+        $is_array_type = in_array($type, $array_types, true);
+        if ($is_array_type && !is_array($arg)) $this->nonSQLError("Badly formatted SQL query: Expected array, got scalar instead!");
+        else if (!$is_array_type && is_array($arg)) $this->nonSQLError("Badly formatted SQL query: Expected scalar, got array instead!");
+      }
       
       if ($type == 's') $result = $this->escape($arg);
       else if ($type == 'i') $result = $this->intval($arg);
@@ -607,13 +581,8 @@ class MeekroDB {
       else if ($type == 'lt') $result = array_map(array($this, 'escape'), array_map(array($this, 'parseTS'), $arg));
       
       else if ($type == '?') $result = $this->sanitize($arg);
-      else if ($type == 'l?') $result = $this->sanitize($arg, 'list');
-      else if ($type == 'll?') $result = $this->sanitize($arg, 'doublelist');
-      else if ($type == 'hc') $result = $this->sanitize($arg, 'hash');
-      else if ($type == 'ha') $result = $this->sanitize($arg, 'hash', ' AND ');
-      else if ($type == 'ho') $result = $this->sanitize($arg, 'hash', ' OR ');
       
-      else return $this->nonSQLError("Badly formatted SQL query: Invalid MeekroDB param $type");
+      else $this->nonSQLError("Badly formatted SQL query: Invalid MeekroDB param $type");
       
       if (is_array($result)) $result = '(' . implode(',', $result) . ')';
       
@@ -658,7 +627,7 @@ class MeekroDB {
         $row_type = 'raw';
         break;
       default:
-        return $this->nonSQLError('Error -- invalid argument to queryHelper!');
+        $this->nonSQLError('Error -- invalid argument to queryHelper!');
     }
 
     $sql = call_user_func_array(array($this, 'parseQueryParams'), $args);
@@ -811,7 +780,7 @@ class WhereClause {
   
   function __construct($type) {
     $type = strtolower($type);
-    if ($type !== 'or' && $type !== 'and') return DB::nonSQLError('you must use either WhereClause(and) or WhereClause(or)');
+    if ($type !== 'or' && $type !== 'and') DB::nonSQLError('you must use either WhereClause(and) or WhereClause(or)');
     $this->type = $type;
   }
   
