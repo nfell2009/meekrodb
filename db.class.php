@@ -38,7 +38,6 @@ class DB {
   public static $usenull = true;
   public static $ssl = array('key' => '', 'cert' => '', 'ca_cert' => '', 'ca_path' => '', 'cipher' => '');
   public static $connect_options = array(MYSQLI_OPT_CONNECT_TIMEOUT => 30);
-  public static $convert_html_chars = true;
   
   // internal
   protected static $mdb = null;
@@ -496,11 +495,7 @@ class MeekroDB {
   }
   
   protected function escape($str) {
-    if($this->convert_html_chars) {
-      return "'" . htmlspecialchars($this->get()->real_escape_string(strval($str))) . "'"; 
-    } else {
-      return "'" . $this->get()->real_escape_string(strval($str)) . "'"; 
-    }
+    return "'" . htmlspecialchars($this->get()->real_escape_string(strval($str))) . "'"; 
   }
   
   protected function sanitize($value) {
